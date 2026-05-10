@@ -1,0 +1,11 @@
+name: iAudioApp
+options:
+  bundleIdPrefix: com.yourname
+targets:
+  iAudioApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "14.0"
+    sources: [iAudioApp]
+    info:
+      path: iAudioApp/Info.plist
