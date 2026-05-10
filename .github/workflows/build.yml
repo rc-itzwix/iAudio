@@ -41,6 +41,10 @@ jobs:
             <string>Нужен микрофон для передачи аудио</string>
             <key>NSLocalNetworkUsageDescription</key>
             <string>Нужен доступ к сети</string>
+            <key>UIBackgroundModes</key>
+            <array>
+              <string>audio</string>
+            </array>
           </dict>
           </plist>
           EOF
@@ -76,7 +80,11 @@ jobs:
               @AppStorage("sampleRate") var sampleRate: Double = 48000.0
               @AppStorage("channels") var channels: Int = 1
               @AppStorage("bitDepth") var bitDepth: String = "Int16"
-              @Published var selectedMic: MicInputOption? = nil
+              @AppStorage("protocolType") var protocolType: String = "UDP"
+              @AppStorage("bufferSize") var bufferSize: Int = 1024
+              @AppStorage("hapticFeedback") var hapticFeedback: Bool = true
+              @AppStorage("selectedMicID") var selectedMicID: String = ""
+              @Published var activeMic: MicInputOption? = nil
           }
 
           class AudioStreamer: ObservableObject {
@@ -87,14 +95,15 @@ jobs:
               func start(config: StreamSettings) {
                   let host = NWEndpoint.Host(config.ipAddress)
                   let port = NWEndpoint.Port(config.port) ?? 12345
-                  connection = NWConnection(host: host, port: port, using: .udp)
+                  let params: NWParameters = config.protocolType == "TCP" ? .tcp : .udp
+                  connection = NWConnection(host: host, port: port, using: params)
                   connection?.start(queue: .global())
                   
                   let session = AVAudioSession.sharedInstance()
                   do {
                       try session.setCategory(.playAndRecord, mode: .measurement, options: [.allowBluetooth, .defaultToSpeaker])
                       
-                      if let targetMic = config.selectedMic, let inputs = session.availableInputs {
+                      if let targetMic = config.activeMic, let inputs = session.availableInputs {
                           if let port = inputs.first(where: { $0.uid == targetMic.portUID }) {
                               try session.setPreferredInput(port)
                               if let dsID = targetMic.dataSourceID, let dataSources = port.dataSources {
@@ -106,6 +115,7 @@ jobs:
                       }
                       
                       try session.setPreferredSampleRate(config.sampleRate)
+                      try session.setPreferredIOBufferDuration(Double(config.bufferSize) / config.sampleRate)
                       try session.setActive(true)
                   } catch {}
                   
@@ -120,7 +130,7 @@ jobs:
                   
                   let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
                   
-                  inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, time in
+                  inputNode.installTap(onBus: 0, bufferSize: AVAudioFrameCount(config.bufferSize), format: inputFormat) { buffer, time in
                       let frameCount = AVAudioFrameCount(outputFormat.sampleRate / 100)
                       guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
                       var error: NSError?
@@ -135,6 +145,7 @@ jobs:
                   do {
                       try audioEngine.start()
                       isStreaming = true
+                      if config.hapticFeedback { UIImpactFeedbackGenerator(style: .heavy).impactOccurred() }
                   } catch {}
               }
               
@@ -143,6 +154,7 @@ jobs:
                   audioEngine.inputNode.removeTap(onBus: 0)
                   connection?.cancel()
                   isStreaming = false
+                  UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
               }
               
               private func toData(buffer: AVAudioPCMBuffer) -> Data? {
@@ -157,17 +169,50 @@ jobs:
               }
           }
 
+          struct CustomMicIcon: View {
+              var isActive: Bool
+              var color: Color { isActive ? .cyan : .white }
+              
+              var body: some View {
+                  ZStack {
+                      VStack(spacing: 6) {
+                          RoundedRectangle(cornerRadius: 18)
+                              .stroke(color, lineWidth: 6)
+                              .background(RoundedRectangle(cornerRadius: 18).fill(isActive ? color.opacity(0.2) : Color.clear))
+                              .frame(width: 50, height: 90)
+                          
+                          Rectangle()
+                              .fill(color)
+                              .frame(width: 6, height: 25)
+                          
+                          RoundedRectangle(cornerRadius: 4)
+                              .fill(color)
+                              .frame(width: 50, height: 6)
+                      }
+                      
+                      Path { path in
+                          path.move(to: CGPoint(x: 10, y: 65))
+                          path.addCurve(to: CGPoint(x: 70, y: 65), control1: CGPoint(x: 10, y: 110), control2: CGPoint(x: 70, y: 110))
+                      }
+                      .stroke(color, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                      .frame(width: 80, height: 110)
+                      .offset(y: 10)
+                  }
+                  .frame(width: 100, height: 140)
+              }
+          }
+
           struct WaveView: View {
               @State private var wave = false
               var body: some View {
                   ZStack {
-                      ForEach(0..<3) { i in
+                      ForEach(0..<2) { i in
                           Circle()
-                              .fill(RadialGradient(gradient: Gradient(colors: [Color.blue.opacity(0.8), Color.clear]), center: .center, startRadius: 10, endRadius: 120))
-                              .frame(width: 80, height: 80)
-                              .scaleEffect(wave ? 4 : 1)
+                              .stroke(Color.cyan.opacity(0.4), lineWidth: 2)
+                              .frame(width: 150, height: 150)
+                              .scaleEffect(wave ? 3.5 : 1)
                               .opacity(wave ? 0 : 1)
-                              .animation(Animation.easeOut(duration: 2).repeatForever(autoreverses: false).delay(Double(i) * 0.6), value: wave)
+                              .animation(Animation.easeOut(duration: 4).repeatForever(autoreverses: false).delay(Double(i) * 2), value: wave)
                       }
                   }
                   .onAppear { wave = true }
@@ -178,21 +223,19 @@ jobs:
               @ObservedObject var streamer: AudioStreamer
               @ObservedObject var settings: StreamSettings
               var body: some View {
-                  VStack {
-                      Spacer()
-                      ZStack {
-                          if streamer.isStreaming { WaveView() }
-                          Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(config: settings) }) {
-                              Image(systemName: "mic.fill")
-                                  .resizable()
-                                  .scaledToFit()
-                                  .frame(width: 60, height: 60)
-                                  .foregroundColor(streamer.isStreaming ? .blue : .gray)
-                                  .shadow(color: streamer.isStreaming ? .blue : .clear, radius: 15, x: 0, y: 0)
+                  ZStack {
+                      Color.black.ignoresSafeArea()
+                      VStack {
+                          Spacer()
+                          ZStack {
+                              if streamer.isStreaming { WaveView() }
+                              Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(config: settings) }) {
+                                  CustomMicIcon(isActive: streamer.isStreaming)
+                              }
+                              .buttonStyle(PlainButtonStyle())
                           }
-                          .buttonStyle(PlainButtonStyle())
+                          Spacer()
                       }
-                      Spacer()
                   }
               }
           }
@@ -201,7 +244,6 @@ jobs:
               @ObservedObject var settings: StreamSettings
               @State private var availableOptions: [MicInputOption] = []
               @State private var availableRates: [Double] = [16000.0, 32000.0, 44100.0, 48000.0]
-              let bitDepths = ["Int16", "Float32"]
               
               var body: some View {
                   NavigationView {
@@ -209,9 +251,13 @@ jobs:
                           Section(header: Text("Сеть")) {
                               TextField("IP Address", text: $settings.ipAddress).keyboardType(.numbersAndPunctuation)
                               TextField("Port", text: $settings.port).keyboardType(.numberPad)
+                              Picker("Протокол", selection: $settings.protocolType) {
+                                  Text("UDP (Быстро)").tag("UDP")
+                                  Text("TCP (Надежно)").tag("TCP")
+                              }
                           }
                           Section(header: Text("Устройство захвата")) {
-                              Picker("Микрофон", selection: $settings.selectedMic) {
+                              Picker("Микрофон", selection: $settings.activeMic) {
                                   Text("Автоматически").tag(nil as MicInputOption?)
                                   ForEach(availableOptions, id: \.self) { option in
                                       Text(option.name).tag(option as MicInputOption?)
@@ -227,10 +273,20 @@ jobs:
                                   Text("Стерео").tag(2)
                               }
                               Picker("Разрядность", selection: $settings.bitDepth) {
-                                  ForEach(bitDepths, id: \.self) { depth in Text(depth).tag(depth) }
+                                  Text("16-bit (Int16)").tag("Int16")
+                                  Text("32-bit (Float32)").tag("Float32")
                               }
                           }
-                          Section {
+                          Section(header: Text("Производительность"), footer: Text("Меньший буфер = меньше задержка, но выше нагрузка на сеть.")) {
+                              Picker("Размер буфера (Сэмплы)", selection: $settings.bufferSize) {
+                                  Text("512").tag(512)
+                                  Text("1024").tag(1024)
+                                  Text("2048").tag(2048)
+                                  Text("4096").tag(4096)
+                              }
+                          }
+                          Section(header: Text("Система")) {
+                              Toggle("Тактильный отклик", isOn: $settings.hapticFeedback)
                               Button("Пересканировать оборудование") { refreshDevices() }
                           }
                       }
@@ -249,10 +305,14 @@ jobs:
                       for input in inputs {
                           if input.portType == .builtInMic, let sources = input.dataSources {
                               for source in sources {
-                                  options.append(MicInputOption(id: "\(input.uid)_\(source.dataSourceID ?? 0)", name: "Встроенный: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID))
+                                  let newOption = MicInputOption(id: "\(input.uid)_\(source.dataSourceID ?? 0)", name: "Встроенный: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID)
+                                  options.append(newOption)
+                                  if newOption.id == settings.selectedMicID { settings.activeMic = newOption }
                               }
                           } else {
-                              options.append(MicInputOption(id: input.uid, name: input.portName, portUID: input.uid, dataSourceID: nil))
+                              let newOption = MicInputOption(id: input.uid, name: input.portName, portUID: input.uid, dataSourceID: nil)
+                              options.append(newOption)
+                              if newOption.id == settings.selectedMicID { settings.activeMic = newOption }
                           }
                       }
                   }
@@ -271,8 +331,13 @@ jobs:
               @StateObject var settings = StreamSettings()
               var body: some View {
                   TabView {
-                      MainView(streamer: streamer, settings: settings).tabItem { Label("Главная", systemImage: "waveform") }
-                      SettingsView(settings: settings).tabItem { Label("Настройки", systemImage: "slider.horizontal.3") }
+                      MainView(streamer: streamer, settings: settings)
+                          .tabItem { Label("Микрофон", systemImage: "mic.fill") }
+                          .toolbar(.visible, for: .tabBar)
+                          .toolbarBackground(Color.black, for: .tabBar)
+                          .toolbarColorScheme(.dark, for: .tabBar)
+                      SettingsView(settings: settings)
+                          .tabItem { Label("Настройки", systemImage: "slider.horizontal.3") }
                   }
                   .onAppear { AVAudioSession.sharedInstance().requestRecordPermission { _ in } }
               }
