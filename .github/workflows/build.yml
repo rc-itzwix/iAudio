@@ -26,7 +26,7 @@ jobs:
             iAudioApp:
               type: application
               platform: iOS
-              deploymentTarget: "15.0"
+              deploymentTarget: "16.0"
               sources: [iAudioApp]
               info:
                 path: iAudioApp/Info.plist
@@ -305,7 +305,7 @@ jobs:
                       for input in inputs {
                           if input.portType == .builtInMic, let sources = input.dataSources {
                               for source in sources {
-                                  let newOption = MicInputOption(id: "\(input.uid)_\(source.dataSourceID ?? 0)", name: "Встроенный: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID)
+                                  let newOption = MicInputOption(id: "\(input.uid)_\(source.dataSourceID)", name: "Встроенный: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID)
                                   options.append(newOption)
                                   if newOption.id == settings.selectedMicID { settings.activeMic = newOption }
                               }
