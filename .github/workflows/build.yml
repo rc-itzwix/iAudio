@@ -172,50 +172,20 @@ jobs:
               }
           }
 
-          struct CustomMicIcon: View {
-              var body: some View {
-                  VStack(spacing: 0) {
-                      ZStack {
-                          RoundedRectangle(cornerRadius: 18)
-                              .fill(Color.white)
-                              .frame(width: 44, height: 86)
-                              .offset(y: -8)
-                          
-                          RoundedRectangle(cornerRadius: 26)
-                              .stroke(Color.white, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                              .frame(width: 68, height: 90)
-                              .mask(
-                                  VStack(spacing: 0) {
-                                      Color.clear.frame(height: 45)
-                                      Color.black
-                                  }
-                              )
-                              .offset(y: -8)
-                      }
-                      .frame(height: 100)
-                      
-                      Rectangle()
-                          .fill(Color.white)
-                          .frame(width: 6, height: 26)
-                  }
-                  .frame(width: 100, height: 140)
-              }
-          }
-
           struct WaveView: View {
               @State private var wave = false
               var body: some View {
                   ZStack {
                       ForEach(0..<3) { i in
                           Circle()
-                              .fill(Color.cyan.opacity(0.15))
-                              .frame(width: 120, height: 120)
-                              .scaleEffect(wave ? 3.5 : 1.0)
+                              .fill(Color.blue.opacity(0.2))
+                              .frame(width: 140, height: 140)
+                              .scaleEffect(wave ? 4.5 : 1.0)
                               .opacity(wave ? 0.0 : 1.0)
                               .animation(
-                                  Animation.timingCurve(0.2, 0.8, 0.2, 1, duration: 4.0)
+                                  Animation.timingCurve(0.2, 0.8, 0.2, 1, duration: 6.0)
                                       .repeatForever(autoreverses: false)
-                                      .delay(Double(i) * 1.2),
+                                      .delay(Double(i) * 2.0),
                                   value: wave
                               )
                       }
@@ -235,7 +205,10 @@ jobs:
                           ZStack {
                               if streamer.isStreaming { WaveView() }
                               Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(config: settings) }) {
-                                  CustomMicIcon()
+                                  Image(systemName: streamer.isStreaming ? "mic.fill" : "mic.slash.fill")
+                                      .font(.system(size: 130))
+                                      .foregroundColor(.white)
+                                      .frame(width: 160, height: 160)
                               }
                               .buttonStyle(PlainButtonStyle())
                           }
@@ -361,7 +334,7 @@ jobs:
                           .toolbarBackground(Color.black, for: .tabBar)
                           .toolbarColorScheme(.dark, for: .tabBar)
                       SettingsView(settings: settings)
-                          .tabItem { Label("Настройки", systemImage: "gearshape") }
+                          .tabItem { Label("Настройки", systemImage: "gear") }
                   }
                   .onAppear { AVAudioSession.sharedInstance().requestRecordPermission { _ in } }
               }
