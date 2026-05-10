@@ -39,6 +39,8 @@ jobs:
           <dict>
             <key>NSMicrophoneUsageDescription</key>
             <string>Нужен микрофон для передачи аудио на ПК</string>
+            <key>NSLocalNetworkUsageDescription</key>
+            <string>Нужен доступ к локальной сети для передачи аудио</string>
           </dict>
           </plist>
           EOF
@@ -61,66 +63,184 @@ jobs:
           import AVFoundation
           import Network
 
-          struct ContentView: View {
-              @State private var isStreaming = false
-              @State private var ipAddress = "192.168.137.1"
-              @State private var port = "12345"
-              @State private var audioEngine = AVAudioEngine()
-              @State private var connection: NWConnection?
+          class StreamSettings: ObservableObject {
+              @AppStorage("ipAddress") var ipAddress: String = "192.168.1.100"
+              @AppStorage("port") var port: String = "12345"
+              @AppStorage("sampleRate") var sampleRate: Double = 48000.0
+              @AppStorage("channels") var channels: Int = 1
+              @AppStorage("bitDepth") var bitDepth: String = "Int16"
+              @Published var selectedMicID: String? = nil
+          }
+
+          class AudioStreamer: ObservableObject {
+              @Published var isStreaming = false
+              private var audioEngine = AVAudioEngine()
+              private var connection: NWConnection?
+              private let settings = StreamSettings()
               
-              var body: some View {
-                  VStack(spacing: 30) {
-                      Text("iAudio Mic").font(.largeTitle).bold()
-                      TextField("IP Address", text: $ipAddress)
-                          .textFieldStyle(RoundedBorderTextFieldStyle())
-                          .padding(.horizontal).keyboardType(.numbersAndPunctuation)
-                      Button(action: {
-                          isStreaming ? stopStreaming() : requestMicAndStart()
-                      }) {
-                          Text(isStreaming ? "Stop Streaming" : "Start Streaming")
-                              .font(.title2).foregroundColor(.white)
-                              .frame(width: 250, height: 60)
-                              .background(isStreaming ? Color.red : Color.green)
-                              .cornerRadius(15)
-                      }
-                  }
-              }
-              
-              func requestMicAndStart() {
-                  AVAudioSession.sharedInstance().requestRecordPermission { granted in
-                      if granted { DispatchQueue.main.async { self.startStreaming() } }
-                  }
-              }
-              
-              func startStreaming() {
-                  let host = NWEndpoint.Host(ipAddress)
-                  let portNum = NWEndpoint.Port(port) ?? 12345
-                  connection = NWConnection(host: host, port: portNum, using: .udp)
+              func start(config: StreamSettings) {
+                  let host = NWEndpoint.Host(config.ipAddress)
+                  let port = NWEndpoint.Port(config.port) ?? 12345
+                  connection = NWConnection(host: host, port: port, using: .udp)
                   connection?.start(queue: .global())
                   
-                  let audioSession = AVAudioSession.sharedInstance()
-                  try? audioSession.setCategory(.record, mode: .measurement, options: [.allowBluetooth])
-                  try? audioSession.setPreferredSampleRate(48000)
-                  try? audioSession.setActive(true)
+                  let session = AVAudioSession.sharedInstance()
+                  do {
+                      try session.setCategory(.playAndRecord, mode: .measurement, options: [.allowBluetooth, .defaultToSpeaker])
+                      if let micID = config.selectedMicID,
+                         let inputs = session.availableInputs,
+                         let targetInput = inputs.first(where: { $0.uid == micID }) {
+                          try session.setPreferredInput(targetInput)
+                      }
+                      try session.setPreferredSampleRate(config.sampleRate)
+                      try session.setActive(true)
+                  } catch {}
                   
                   let inputNode = audioEngine.inputNode
-                  let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48000, channels: 1, interleaved: true)!
+                  let inputFormat = inputNode.inputFormat(onBus: 0)
+                  let outputFormat = AVAudioFormat(
+                      commonFormat: config.bitDepth == "Int16" ? .pcmFormatInt16 : .pcmFormatFloat32,
+                      sampleRate: config.sampleRate,
+                      channels: AVAudioChannelCount(config.channels),
+                      interleaved: true
+                  )!
+                  let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
                   
-                  inputNode.installTap(onBus: 0, bufferSize: 960, format: format) { (buffer, time) in
-                      guard let channelData = buffer.int16ChannelData else { return }
-                      let frameLength = Int(buffer.frameLength)
-                      let data = Data(bytes: channelData[0], count: frameLength * MemoryLayout<Int16>.size)
-                      self.connection?.send(content: data, completion: .contentProcessed({ _ in }))
+                  inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, time in
+                      let frameCount = AVAudioFrameCount(outputFormat.sampleRate / 100)
+                      guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
+                      var error: NSError?
+                      converter?.convert(to: outBuffer, error: &error) { inNumPackets, outStatus in
+                          outStatus.pointee = .haveData
+                          return buffer
+                      }
+                      if let data = self.toData(buffer: outBuffer) {
+                          self.connection?.send(content: data, completion: .contentProcessed({ _ in }))
+                      }
                   }
-                  try? audioEngine.start()
-                  isStreaming = true
+                  do {
+                      try audioEngine.start()
+                      isStreaming = true
+                  } catch {}
               }
               
-              func stopStreaming() {
+              func stop() {
                   audioEngine.stop()
                   audioEngine.inputNode.removeTap(onBus: 0)
                   connection?.cancel()
                   isStreaming = false
+              }
+              
+              private func toData(buffer: AVAudioPCMBuffer) -> Data? {
+                  let frameLength = Int(buffer.frameLength)
+                  if buffer.format.commonFormat == .pcmFormatInt16 {
+                      guard let channelData = buffer.int16ChannelData else { return nil }
+                      return Data(bytes: channelData[0], count: frameLength * MemoryLayout<Int16>.size)
+                  } else {
+                      guard let channelData = buffer.floatChannelData else { return nil }
+                      return Data(bytes: channelData[0], count: frameLength * MemoryLayout<Float>.size)
+                  }
+              }
+          }
+
+          struct WaveView: View {
+              @State private var wave = false
+              var body: some View {
+                  ZStack {
+                      ForEach(0..<3) { i in
+                          Circle()
+                              .stroke(Color.blue.opacity(0.5))
+                              .frame(width: 100, height: 100)
+                              .scaleEffect(wave ? 3 : 1)
+                              .opacity(wave ? 0 : 1)
+                              .animation(Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: false).delay(Double(i) * 0.5), value: wave)
+                      }
+                  }
+                  .onAppear { wave = true }
+              }
+          }
+
+          struct MainView: View {
+              @ObservedObject var streamer: AudioStreamer
+              @ObservedObject var settings: StreamSettings
+              var body: some View {
+                  VStack {
+                      Spacer()
+                      ZStack {
+                          if streamer.isStreaming { WaveView() }
+                          Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(config: settings) }) {
+                              Image(systemName: streamer.isStreaming ? "mic.fill" : "mic.slash.fill")
+                                  .font(.system(size: 80))
+                                  .foregroundColor(.white)
+                                  .frame(width: 150, height: 150)
+                                  .background(streamer.isStreaming ? Color.blue : Color.gray)
+                                  .clipShape(Circle())
+                                  .shadow(radius: 10)
+                          }
+                      }
+                      Text(streamer.isStreaming ? "В ЭФИРЕ" : "ГОТОВ К ПЕРЕДАЧЕ")
+                          .font(.headline).padding(.top, 40)
+                          .foregroundColor(streamer.isStreaming ? .blue : .gray)
+                      Text("\(settings.ipAddress):\(settings.port)")
+                          .font(.caption).foregroundColor(.secondary)
+                      Spacer()
+                  }
+              }
+          }
+
+          struct SettingsView: View {
+              @ObservedObject var settings: StreamSettings
+              @State private var availableMics: [AVAudioSessionPortDescription] = []
+              let rates = [16000.0, 32000.0, 44100.0, 48000.0, 96000.0]
+              let bitDepths = ["Int16", "Float32"]
+              
+              var body: some View {
+                  NavigationView {
+                      Form {
+                          Section(header: Text("Сетевой адрес")) {
+                              TextField("IP Address", text: $settings.ipAddress).keyboardType(.numbersAndPunctuation)
+                              TextField("Port", text: $settings.port).keyboardType(.numberPad)
+                          }
+                          Section(header: Text("Выбор микрофона")) {
+                              Picker("Устройство", selection: $settings.selectedMicID) {
+                                  Text("Системный (По умолчанию)").tag(nil as String?)
+                                  ForEach(availableMics, id: \.uid) { mic in
+                                      Text(mic.portName).tag(mic.uid as String?)
+                                  }
+                              }
+                          }
+                          Section(header: Text("Параметры аудио")) {
+                              Picker("Частота (кГц)", selection: $settings.sampleRate) {
+                                  ForEach(rates, id: \.self) { rate in Text("\(Int(rate/1000)) kHz").tag(rate) }
+                              }
+                              Picker("Каналы", selection: $settings.channels) {
+                                  Text("Моно").tag(1)
+                                  Text("Стерео").tag(2)
+                              }
+                              Picker("Разрядность", selection: $settings.bitDepth) {
+                                  ForEach(bitDepths, id: \.self) { depth in Text(depth).tag(depth) }
+                              }
+                          }
+                          Section(footer: Text("Используйте 48kHz / Int16 для минимальной задержки.")) {
+                              Button("Обновить список устройств") { refreshDevices() }
+                          }
+                      }
+                      .navigationTitle("Настройки")
+                      .onAppear { refreshDevices() }
+                  }
+              }
+              func refreshDevices() { availableMics = AVAudioSession.sharedInstance().availableInputs ?? [] }
+          }
+
+          struct ContentView: View {
+              @StateObject var streamer = AudioStreamer()
+              @StateObject var settings = StreamSettings()
+              var body: some View {
+                  TabView {
+                      MainView(streamer: streamer, settings: settings).tabItem { Label("Микрофон", systemImage: "mic") }
+                      SettingsView(settings: settings).tabItem { Label("Настройки", systemImage: "gearshape") }
+                  }
+                  .onAppear { AVAudioSession.sharedInstance().requestRecordPermission { _ in } }
               }
           }
           EOF
