@@ -86,10 +86,6 @@ jobs:
               @AppStorage("keepAwake") var keepAwake: Bool = true
               @AppStorage("hapticFeedback") var hapticFeedback: Bool = true
               
-              // Настройки USB
-              @AppStorage("usbAutoStart") var usbAutoStart: Bool = false
-              @AppStorage("usbHighPerf") var usbHighPerf: Bool = true
-              
               @AppStorage("selectedMicID") var selectedMicID: String = ""
               @Published var activeMic: MicInputOption? = nil
           }
@@ -181,17 +177,61 @@ jobs:
               }
           }
 
+          struct CustomMicIcon: View {
+              var body: some View {
+                  VStack(spacing: 8) {
+                      ZStack {
+                          // Основная капсула (прямоугольник с закруглениями)
+                          RoundedRectangle(cornerRadius: 22)
+                              .fill(Color.white)
+                              .frame(width: 55, height: 90)
+                              .zIndex(1)
+                          
+                          // Дуга (U-образный держатель)
+                          Path { p in
+                              p.move(to: CGPoint(x: 5, y: 50))
+                              p.addLine(to: CGPoint(x: 5, y: 65))
+                              p.addCurve(to: CGPoint(x: 75, y: 65), control1: CGPoint(x: 5, y: 105), control2: CGPoint(x: 75, y: 105))
+                              p.addLine(to: CGPoint(x: 75, y: 50))
+                          }
+                          .stroke(Color.white, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                          .frame(width: 80, height: 100)
+                      }
+                      .frame(height: 110)
+                      
+                      // Ножка
+                      Rectangle()
+                          .fill(Color.white)
+                          .frame(width: 10, height: 18)
+                      
+                      // Подставка
+                      RoundedRectangle(cornerRadius: 5)
+                          .fill(Color.white)
+                          .frame(width: 45, height: 10)
+                  }
+                  .frame(width: 120, height: 160)
+              }
+          }
+
           struct WaveView: View {
               @State private var wave = false
               var body: some View {
                   ZStack {
-                      ForEach(0..<3) { i in
+                      ForEach(0..<4) { i in
                           Circle()
-                              .stroke(Color.blue, lineWidth: 10)
-                              .frame(width: 130, height: 130)
-                              .scaleEffect(wave ? 3.0 : 1.0)
-                              .opacity(wave ? 0 : 0.6)
-                              .animation(Animation.easeOut(duration: 2.5).repeatForever(autoreverses: false).delay(Double(i) * 0.8), value: wave)
+                              .stroke(
+                                  LinearGradient(gradient: Gradient(colors: [Color.cyan.opacity(0.8), Color.blue.opacity(0.3)]), startPoint: .top, endPoint: .bottom),
+                                  lineWidth: 12
+                              )
+                              .frame(width: 140, height: 140)
+                              .scaleEffect(wave ? 4.5 : 1.0)
+                              .opacity(wave ? 0.0 : 0.8)
+                              .animation(
+                                  Animation.timingCurve(0.2, 0.8, 0.2, 1, duration: 4.5)
+                                      .repeatForever(autoreverses: false)
+                                      .delay(Double(i) * 1.1),
+                                  value: wave
+                              )
                       }
                   }
                   .onAppear { wave = true }
@@ -209,19 +249,11 @@ jobs:
                           ZStack {
                               if streamer.isStreaming { WaveView() }
                               Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(config: settings) }) {
-                                  Image(systemName: "mic.fill")
-                                      .font(.system(size: 90))
-                                      .foregroundColor(.white)
-                                      .frame(width: 140, height: 140)
+                                  CustomMicIcon()
                               }
                               .buttonStyle(PlainButtonStyle())
                           }
                           Spacer()
-                      }
-                  }
-                  .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { _ in
-                      if settings.usbAutoStart && AVAudioSession.sharedInstance().currentRoute.inputs.contains(where: { $0.portType == .usbAudio }) {
-                          if !streamer.isStreaming { streamer.start(config: settings) }
                       }
                   }
               }
@@ -253,8 +285,8 @@ jobs:
                                       .foregroundColor(.secondary)
                               }
                               Picker("Протокол", selection: $settings.protocolType) {
-                                  Text("UDP (Fast)").tag("UDP")
-                                  Text("TCP (Reliable)").tag("TCP")
+                                  Text("UDP (Быстрый)").tag("UDP")
+                                  Text("TCP (Надежный)").tag("TCP")
                               }
                           }
                           
@@ -265,11 +297,6 @@ jobs:
                                       Text(option.name).tag(option as MicInputOption?)
                                   }
                               }
-                          }
-
-                          Section(header: Text("USB-подключение")) {
-                              Toggle("Автостарт при подключении", isOn: $settings.usbAutoStart)
-                              Toggle("Максимальная мощь USB", isOn: $settings.usbHighPerf)
                           }
                           
                           Section(header: Text("Качество и формат")) {
@@ -318,7 +345,7 @@ jobs:
                       for input in inputs {
                           if input.portType == .builtInMic, let sources = input.dataSources {
                               for source in sources {
-                                  let newOption = MicInputOption(id: "\(input.uid)_\(source.dataSourceID)", name: "Микрофон: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID)
+                                  let newOption = MicInputOption(id: "\(input.uid)_\(source.dataSourceID ?? 0)", name: "Микрофон: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID)
                                   options.append(newOption)
                                   if newOption.id == settings.selectedMicID { settings.activeMic = newOption }
                               }
@@ -350,7 +377,7 @@ jobs:
                           .toolbarBackground(Color.black, for: .tabBar)
                           .toolbarColorScheme(.dark, for: .tabBar)
                       SettingsView(settings: settings)
-                          .tabItem { Label("Настройки", systemImage: "gear.circle.fill") }
+                          .tabItem { Label("Настройки", systemImage: "gearshape.fill") }
                   }
                   .onAppear { AVAudioSession.sharedInstance().requestRecordPermission { _ in } }
               }
