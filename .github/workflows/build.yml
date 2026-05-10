@@ -111,7 +111,7 @@ jobs:
                       guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
                       var error: NSError?
                       converter?.convert(to: outBuffer, error: &error) { inNumPackets, outStatus in
-                          outStatus.pointee = AVAudioConverterOutputStatus.haveData
+                          outStatus.pointee = AVAudioConverterInputStatus.haveData
                           return buffer
                       }
                       if let data = self.toData(buffer: outBuffer) {
