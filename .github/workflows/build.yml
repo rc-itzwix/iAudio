@@ -26,7 +26,7 @@ jobs:
             iAudioApp:
               type: application
               platform: iOS
-              deploymentTarget: "14.0"
+              deploymentTarget: "15.0"
               sources: [iAudioApp]
               info:
                 path: iAudioApp/Info.plist
@@ -38,9 +38,9 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>NSMicrophoneUsageDescription</key>
-            <string>Нужен микрофон для передачи аудио на ПК</string>
+            <string>Нужен микрофон для передачи аудио</string>
             <key>NSLocalNetworkUsageDescription</key>
-            <string>Нужен доступ к локальной сети для передачи аудио</string>
+            <string>Нужен доступ к сети</string>
           </dict>
           </plist>
           EOF
@@ -63,20 +63,26 @@ jobs:
           import AVFoundation
           import Network
 
+          struct MicInputOption: Hashable {
+              let id: String
+              let name: String
+              let portUID: String
+              let dataSourceID: NSNumber?
+          }
+
           class StreamSettings: ObservableObject {
               @AppStorage("ipAddress") var ipAddress: String = "192.168.1.100"
               @AppStorage("port") var port: String = "12345"
               @AppStorage("sampleRate") var sampleRate: Double = 48000.0
               @AppStorage("channels") var channels: Int = 1
               @AppStorage("bitDepth") var bitDepth: String = "Int16"
-              @Published var selectedMicID: String? = nil
+              @Published var selectedMic: MicInputOption? = nil
           }
 
           class AudioStreamer: ObservableObject {
               @Published var isStreaming = false
               private var audioEngine = AVAudioEngine()
               private var connection: NWConnection?
-              private let settings = StreamSettings()
               
               func start(config: StreamSettings) {
                   let host = NWEndpoint.Host(config.ipAddress)
@@ -87,11 +93,18 @@ jobs:
                   let session = AVAudioSession.sharedInstance()
                   do {
                       try session.setCategory(.playAndRecord, mode: .measurement, options: [.allowBluetooth, .defaultToSpeaker])
-                      if let micID = config.selectedMicID,
-                         let inputs = session.availableInputs,
-                         let targetInput = inputs.first(where: { $0.uid == micID }) {
-                          try session.setPreferredInput(targetInput)
+                      
+                      if let targetMic = config.selectedMic, let inputs = session.availableInputs {
+                          if let port = inputs.first(where: { $0.uid == targetMic.portUID }) {
+                              try session.setPreferredInput(port)
+                              if let dsID = targetMic.dataSourceID, let dataSources = port.dataSources {
+                                  if let source = dataSources.first(where: { $0.dataSourceID == dsID }) {
+                                      try port.setPreferredDataSource(source)
+                                  }
+                              }
+                          }
                       }
+                      
                       try session.setPreferredSampleRate(config.sampleRate)
                       try session.setActive(true)
                   } catch {}
@@ -100,10 +113,11 @@ jobs:
                   let inputFormat = inputNode.inputFormat(forBus: 0)
                   let outputFormat = AVAudioFormat(
                       commonFormat: config.bitDepth == "Int16" ? .pcmFormatInt16 : .pcmFormatFloat32,
-                      sampleRate: config.sampleRate,
+                      sampleRate: session.sampleRate,
                       channels: AVAudioChannelCount(config.channels),
                       interleaved: true
                   )!
+                  
                   let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
                   
                   inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, time in
@@ -149,11 +163,11 @@ jobs:
                   ZStack {
                       ForEach(0..<3) { i in
                           Circle()
-                              .stroke(Color.blue.opacity(0.5))
-                              .frame(width: 100, height: 100)
-                              .scaleEffect(wave ? 3 : 1)
+                              .fill(RadialGradient(gradient: Gradient(colors: [Color.blue.opacity(0.8), Color.clear]), center: .center, startRadius: 10, endRadius: 120))
+                              .frame(width: 80, height: 80)
+                              .scaleEffect(wave ? 4 : 1)
                               .opacity(wave ? 0 : 1)
-                              .animation(Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: false).delay(Double(i) * 0.5), value: wave)
+                              .animation(Animation.easeOut(duration: 2).repeatForever(autoreverses: false).delay(Double(i) * 0.6), value: wave)
                       }
                   }
                   .onAppear { wave = true }
@@ -169,20 +183,15 @@ jobs:
                       ZStack {
                           if streamer.isStreaming { WaveView() }
                           Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(config: settings) }) {
-                              Image(systemName: streamer.isStreaming ? "mic.fill" : "mic.slash.fill")
-                                  .font(.system(size: 80))
-                                  .foregroundColor(.white)
-                                  .frame(width: 150, height: 150)
-                                  .background(streamer.isStreaming ? Color.blue : Color.gray)
-                                  .clipShape(Circle())
-                                  .shadow(radius: 10)
+                              Image(systemName: "mic.fill")
+                                  .resizable()
+                                  .scaledToFit()
+                                  .frame(width: 60, height: 60)
+                                  .foregroundColor(streamer.isStreaming ? .blue : .gray)
+                                  .shadow(color: streamer.isStreaming ? .blue : .clear, radius: 15, x: 0, y: 0)
                           }
+                          .buttonStyle(PlainButtonStyle())
                       }
-                      Text(streamer.isStreaming ? "В ЭФИРЕ" : "ГОТОВ К ПЕРЕДАЧЕ")
-                          .font(.headline).padding(.top, 40)
-                          .foregroundColor(streamer.isStreaming ? .blue : .gray)
-                      Text("\(settings.ipAddress):\(settings.port)")
-                          .font(.caption).foregroundColor(.secondary)
                       Spacer()
                   }
               }
@@ -190,28 +199,28 @@ jobs:
 
           struct SettingsView: View {
               @ObservedObject var settings: StreamSettings
-              @State private var availableMics: [AVAudioSessionPortDescription] = []
-              let rates = [16000.0, 32000.0, 44100.0, 48000.0, 96000.0]
+              @State private var availableOptions: [MicInputOption] = []
+              @State private var availableRates: [Double] = [16000.0, 32000.0, 44100.0, 48000.0]
               let bitDepths = ["Int16", "Float32"]
               
               var body: some View {
                   NavigationView {
                       Form {
-                          Section(header: Text("Сетевой адрес")) {
+                          Section(header: Text("Сеть")) {
                               TextField("IP Address", text: $settings.ipAddress).keyboardType(.numbersAndPunctuation)
                               TextField("Port", text: $settings.port).keyboardType(.numberPad)
                           }
-                          Section(header: Text("Выбор микрофона")) {
-                              Picker("Устройство", selection: $settings.selectedMicID) {
-                                  Text("Системный (По умолчанию)").tag(nil as String?)
-                                  ForEach(availableMics, id: \.uid) { mic in
-                                      Text(mic.portName).tag(mic.uid as String?)
+                          Section(header: Text("Устройство захвата")) {
+                              Picker("Микрофон", selection: $settings.selectedMic) {
+                                  Text("Автоматически").tag(nil as MicInputOption?)
+                                  ForEach(availableOptions, id: \.self) { option in
+                                      Text(option.name).tag(option as MicInputOption?)
                                   }
                               }
                           }
-                          Section(header: Text("Параметры аудио")) {
+                          Section(header: Text("Аудиоформат")) {
                               Picker("Частота (кГц)", selection: $settings.sampleRate) {
-                                  ForEach(rates, id: \.self) { rate in Text("\(Int(rate/1000)) kHz").tag(rate) }
+                                  ForEach(availableRates, id: \.self) { rate in Text("\(Int(rate/1000)) kHz").tag(rate) }
                               }
                               Picker("Каналы", selection: $settings.channels) {
                                   Text("Моно").tag(1)
@@ -221,15 +230,40 @@ jobs:
                                   ForEach(bitDepths, id: \.self) { depth in Text(depth).tag(depth) }
                               }
                           }
-                          Section(footer: Text("Используйте 48kHz / Int16 для минимальной задержки.")) {
-                              Button("Обновить список устройств") { refreshDevices() }
+                          Section {
+                              Button("Пересканировать оборудование") { refreshDevices() }
                           }
                       }
                       .navigationTitle("Настройки")
                       .onAppear { refreshDevices() }
                   }
               }
-              func refreshDevices() { availableMics = AVAudioSession.sharedInstance().availableInputs ?? [] }
+              
+              func refreshDevices() {
+                  let session = AVAudioSession.sharedInstance()
+                  try? session.setCategory(.playAndRecord, options: [.allowBluetooth])
+                  try? session.setActive(true)
+                  
+                  var options: [MicInputOption] = []
+                  if let inputs = session.availableInputs {
+                      for input in inputs {
+                          if input.portType == .builtInMic, let sources = input.dataSources {
+                              for source in sources {
+                                  options.append(MicInputOption(id: "\(input.uid)_\(source.dataSourceID ?? 0)", name: "Встроенный: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID))
+                              }
+                          } else {
+                              options.append(MicInputOption(id: input.uid, name: input.portName, portUID: input.uid, dataSourceID: nil))
+                          }
+                      }
+                  }
+                  availableOptions = options
+                  
+                  let currentRate = session.sampleRate
+                  if currentRate > 48000 && !availableRates.contains(currentRate) {
+                      availableRates.append(currentRate)
+                      availableRates.sort()
+                  }
+              }
           }
 
           struct ContentView: View {
@@ -237,8 +271,8 @@ jobs:
               @StateObject var settings = StreamSettings()
               var body: some View {
                   TabView {
-                      MainView(streamer: streamer, settings: settings).tabItem { Label("Микрофон", systemImage: "mic") }
-                      SettingsView(settings: settings).tabItem { Label("Настройки", systemImage: "gearshape") }
+                      MainView(streamer: streamer, settings: settings).tabItem { Label("Главная", systemImage: "waveform") }
+                      SettingsView(settings: settings).tabItem { Label("Настройки", systemImage: "slider.horizontal.3") }
                   }
                   .onAppear { AVAudioSession.sharedInstance().requestRecordPermission { _ in } }
               }
