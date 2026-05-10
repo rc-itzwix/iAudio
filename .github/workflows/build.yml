@@ -84,6 +84,12 @@ jobs:
               @AppStorage("bufferSize") var bufferSize: Int = 1024
               @AppStorage("hapticFeedback") var hapticFeedback: Bool = true
               @AppStorage("selectedMicID") var selectedMicID: String = ""
+              
+              // Новые аппаратные настройки
+              @AppStorage("voiceProcessing") var voiceProcessing: Bool = false
+              @AppStorage("duckOthers") var duckOthers: Bool = true
+              @AppStorage("keepAwake") var keepAwake: Bool = false
+              
               @Published var activeMic: MicInputOption? = nil
           }
 
@@ -99,9 +105,17 @@ jobs:
                   connection = NWConnection(host: host, port: port, using: params)
                   connection?.start(queue: .global())
                   
+                  // Управление экраном
+                  UIApplication.shared.isIdleTimerDisabled = config.keepAwake
+                  
                   let session = AVAudioSession.sharedInstance()
                   do {
-                      try session.setCategory(.playAndRecord, mode: .measurement, options: [.allowBluetooth, .defaultToSpeaker])
+                      // Применяем настройки сессии (Голосовая обработка и Приглушение)
+                      let mode: AVAudioSession.Mode = config.voiceProcessing ? .voiceChat : .measurement
+                      var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .defaultToSpeaker]
+                      if config.duckOthers { options.insert(.duckOthers) }
+                      
+                      try session.setCategory(.playAndRecord, mode: mode, options: options)
                       
                       if let targetMic = config.activeMic, let inputs = session.availableInputs {
                           if let port = inputs.first(where: { $0.uid == targetMic.portUID }) {
@@ -154,6 +168,7 @@ jobs:
                   audioEngine.inputNode.removeTap(onBus: 0)
                   connection?.cancel()
                   isStreaming = false
+                  UIApplication.shared.isIdleTimerDisabled = false
                   UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
               }
               
@@ -174,29 +189,36 @@ jobs:
               var color: Color { isActive ? .cyan : .white }
               
               var body: some View {
-                  ZStack {
-                      VStack(spacing: 6) {
-                          RoundedRectangle(cornerRadius: 18)
+                  VStack(spacing: 6) {
+                      ZStack {
+                          // Основной капсюль
+                          RoundedRectangle(cornerRadius: 16)
                               .stroke(color, lineWidth: 6)
-                              .background(RoundedRectangle(cornerRadius: 18).fill(isActive ? color.opacity(0.2) : Color.clear))
-                              .frame(width: 50, height: 90)
+                              .background(RoundedRectangle(cornerRadius: 16).fill(isActive ? color.opacity(0.2) : Color.clear))
+                              .frame(width: 46, height: 80)
+                              .zIndex(1)
                           
-                          Rectangle()
-                              .fill(color)
-                              .frame(width: 6, height: 25)
-                          
-                          RoundedRectangle(cornerRadius: 4)
-                              .fill(color)
-                              .frame(width: 50, height: 6)
+                          // U-образный держатель (дуга)
+                          Path { p in
+                              p.move(to: CGPoint(x: 8, y: 45))
+                              p.addLine(to: CGPoint(x: 8, y: 55))
+                              p.addCurve(to: CGPoint(x: 64, y: 55), control1: CGPoint(x: 8, y: 90), control2: CGPoint(x: 64, y: 90))
+                              p.addLine(to: CGPoint(x: 64, y: 45))
+                          }
+                          .stroke(color, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                          .frame(width: 72, height: 90)
                       }
+                      .frame(height: 100)
                       
-                      Path { path in
-                          path.move(to: CGPoint(x: 10, y: 65))
-                          path.addCurve(to: CGPoint(x: 70, y: 65), control1: CGPoint(x: 10, y: 110), control2: CGPoint(x: 70, y: 110))
-                      }
-                      .stroke(color, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                      .frame(width: 80, height: 110)
-                      .offset(y: 10)
+                      // Ножка микрофона
+                      Rectangle()
+                          .fill(color)
+                          .frame(width: 6, height: 16)
+                      
+                      // Прямоугольная база с закруглениями
+                      RoundedRectangle(cornerRadius: 4)
+                          .fill(color)
+                          .frame(width: 44, height: 8)
                   }
                   .frame(width: 100, height: 140)
               }
@@ -249,13 +271,28 @@ jobs:
                   NavigationView {
                       Form {
                           Section(header: Text("Сеть")) {
-                              TextField("IP Address", text: $settings.ipAddress).keyboardType(.numbersAndPunctuation)
-                              TextField("Port", text: $settings.port).keyboardType(.numberPad)
+                              HStack {
+                                  Text("IP Address")
+                                  Spacer()
+                                  TextField("192.168.1.1", text: $settings.ipAddress)
+                                      .multilineTextAlignment(.trailing)
+                                      .keyboardType(.numbersAndPunctuation)
+                                      .foregroundColor(.secondary)
+                              }
+                              HStack {
+                                  Text("Port")
+                                  Spacer()
+                                  TextField("12345", text: $settings.port)
+                                      .multilineTextAlignment(.trailing)
+                                      .keyboardType(.numberPad)
+                                      .foregroundColor(.secondary)
+                              }
                               Picker("Протокол", selection: $settings.protocolType) {
-                                  Text("UDP (Быстро)").tag("UDP")
-                                  Text("TCP (Надежно)").tag("TCP")
+                                  Text("UDP (Fast)").tag("UDP")
+                                  Text("TCP (Reliable)").tag("TCP")
                               }
                           }
+                          
                           Section(header: Text("Устройство захвата")) {
                               Picker("Микрофон", selection: $settings.activeMic) {
                                   Text("Автоматически").tag(nil as MicInputOption?)
@@ -263,9 +300,12 @@ jobs:
                                       Text(option.name).tag(option as MicInputOption?)
                                   }
                               }
+                              Toggle("Голосовая оптимизация (AEC/AGC)", isOn: $settings.voiceProcessing)
+                              Toggle("Приглушать фоновые звуки", isOn: $settings.duckOthers)
                           }
+                          
                           Section(header: Text("Аудиоформат")) {
-                              Picker("Частота (кГц)", selection: $settings.sampleRate) {
+                              Picker("Частота", selection: $settings.sampleRate) {
                                   ForEach(availableRates, id: \.self) { rate in Text("\(Int(rate/1000)) kHz").tag(rate) }
                               }
                               Picker("Каналы", selection: $settings.channels) {
@@ -277,15 +317,18 @@ jobs:
                                   Text("32-bit (Float32)").tag("Float32")
                               }
                           }
-                          Section(header: Text("Производительность"), footer: Text("Меньший буфер = меньше задержка, но выше нагрузка на сеть.")) {
-                              Picker("Размер буфера (Сэмплы)", selection: $settings.bufferSize) {
+                          
+                          Section(header: Text("Производительность"), footer: Text("Конфигурация размера буфера влияет на задержку (latency) аудиотракта. Минимальные значения обеспечивают Real-Time передачу, но повышают интенсивность пакетной отправки на сетевой интерфейс.")) {
+                              Picker("Размер буфера", selection: $settings.bufferSize) {
                                   Text("512").tag(512)
                                   Text("1024").tag(1024)
                                   Text("2048").tag(2048)
                                   Text("4096").tag(4096)
                               }
                           }
+                          
                           Section(header: Text("Система")) {
+                              Toggle("Активный экран (Keep Awake)", isOn: $settings.keepAwake)
                               Toggle("Тактильный отклик", isOn: $settings.hapticFeedback)
                               Button("Пересканировать оборудование") { refreshDevices() }
                           }
@@ -305,7 +348,7 @@ jobs:
                       for input in inputs {
                           if input.portType == .builtInMic, let sources = input.dataSources {
                               for source in sources {
-                                  let newOption = MicInputOption(id: "\(input.uid)_\(source.dataSourceID)", name: "Встроенный: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID)
+                                  let newOption = MicInputOption(id: "\(input.uid)_\(source.dataSourceID ?? 0)", name: "Встроенный: \(source.dataSourceName)", portUID: input.uid, dataSourceID: source.dataSourceID)
                                   options.append(newOption)
                                   if newOption.id == settings.selectedMicID { settings.activeMic = newOption }
                               }
@@ -337,7 +380,7 @@ jobs:
                           .toolbarBackground(Color.black, for: .tabBar)
                           .toolbarColorScheme(.dark, for: .tabBar)
                       SettingsView(settings: settings)
-                          .tabItem { Label("Настройки", systemImage: "slider.horizontal.3") }
+                          .tabItem { Label("Настройки", systemImage: "gearshape.fill") }
                   }
                   .onAppear { AVAudioSession.sharedInstance().requestRecordPermission { _ in } }
               }
