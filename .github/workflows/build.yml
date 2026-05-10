@@ -82,35 +82,41 @@ jobs:
               @AppStorage("bitDepth") var bitDepth: String = "Int16"
               @AppStorage("protocolType") var protocolType: String = "UDP"
               @AppStorage("bufferSize") var bufferSize: Int = 1024
-              @AppStorage("hapticFeedback") var hapticFeedback: Bool = true
-              @AppStorage("selectedMicID") var selectedMicID: String = ""
               
-              // Новые аппаратные настройки
               @AppStorage("voiceProcessing") var voiceProcessing: Bool = false
               @AppStorage("duckOthers") var duckOthers: Bool = true
-              @AppStorage("keepAwake") var keepAwake: Bool = false
+              @AppStorage("keepAwake") var keepAwake: Bool = true
+              @AppStorage("hapticFeedback") var hapticFeedback: Bool = true
+              @AppStorage("qosVoice") var qosVoice: Bool = true
+              @AppStorage("micGain") var micGain: Double = 1.0
               
+              @AppStorage("selectedMicID") var selectedMicID: String = ""
               @Published var activeMic: MicInputOption? = nil
           }
 
           class AudioStreamer: ObservableObject {
               @Published var isStreaming = false
               private var audioEngine = AVAudioEngine()
+              private var mixerNode = AVAudioMixerNode()
               private var connection: NWConnection?
+              private var isMixerAttached = false
               
               func start(config: StreamSettings) {
                   let host = NWEndpoint.Host(config.ipAddress)
-                  let port = NWEndpoint.Port(config.port) ?? 12345
+                  let portNum = NWEndpoint.Port(config.port) ?? 12345
                   let params: NWParameters = config.protocolType == "TCP" ? .tcp : .udp
-                  connection = NWConnection(host: host, port: port, using: params)
+                  
+                  if config.qosVoice {
+                      params.serviceClass = .interactiveVoice
+                  }
+                  
+                  connection = NWConnection(host: host, port: portNum, using: params)
                   connection?.start(queue: .global())
                   
-                  // Управление экраном
                   UIApplication.shared.isIdleTimerDisabled = config.keepAwake
                   
                   let session = AVAudioSession.sharedInstance()
                   do {
-                      // Применяем настройки сессии (Голосовая обработка и Приглушение)
                       let mode: AVAudioSession.Mode = config.voiceProcessing ? .voiceChat : .measurement
                       var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .defaultToSpeaker]
                       if config.duckOthers { options.insert(.duckOthers) }
@@ -135,6 +141,15 @@ jobs:
                   
                   let inputNode = audioEngine.inputNode
                   let inputFormat = inputNode.inputFormat(forBus: 0)
+                  
+                  if !isMixerAttached {
+                      audioEngine.attach(mixerNode)
+                      audioEngine.connect(inputNode, to: mixerNode, format: inputFormat)
+                      isMixerAttached = true
+                  }
+                  
+                  mixerNode.volume = Float(config.micGain)
+                  
                   let outputFormat = AVAudioFormat(
                       commonFormat: config.bitDepth == "Int16" ? .pcmFormatInt16 : .pcmFormatFloat32,
                       sampleRate: session.sampleRate,
@@ -144,7 +159,7 @@ jobs:
                   
                   let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
                   
-                  inputNode.installTap(onBus: 0, bufferSize: AVAudioFrameCount(config.bufferSize), format: inputFormat) { buffer, time in
+                  mixerNode.installTap(onBus: 0, bufferSize: AVAudioFrameCount(config.bufferSize), format: inputFormat) { buffer, time in
                       let frameCount = AVAudioFrameCount(outputFormat.sampleRate / 100)
                       guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
                       var error: NSError?
@@ -165,11 +180,17 @@ jobs:
               
               func stop() {
                   audioEngine.stop()
-                  audioEngine.inputNode.removeTap(onBus: 0)
+                  mixerNode.removeTap(onBus: 0)
                   connection?.cancel()
                   isStreaming = false
                   UIApplication.shared.isIdleTimerDisabled = false
                   UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+              }
+              
+              func updateGain(_ gain: Double) {
+                  if isStreaming {
+                      mixerNode.volume = Float(gain)
+                  }
               }
               
               private func toData(buffer: AVAudioPCMBuffer) -> Data? {
@@ -184,57 +205,17 @@ jobs:
               }
           }
 
-          struct CustomMicIcon: View {
-              var isActive: Bool
-              var color: Color { isActive ? .cyan : .white }
-              
-              var body: some View {
-                  VStack(spacing: 6) {
-                      ZStack {
-                          // Основной капсюль
-                          RoundedRectangle(cornerRadius: 16)
-                              .stroke(color, lineWidth: 6)
-                              .background(RoundedRectangle(cornerRadius: 16).fill(isActive ? color.opacity(0.2) : Color.clear))
-                              .frame(width: 46, height: 80)
-                              .zIndex(1)
-                          
-                          // U-образный держатель (дуга)
-                          Path { p in
-                              p.move(to: CGPoint(x: 8, y: 45))
-                              p.addLine(to: CGPoint(x: 8, y: 55))
-                              p.addCurve(to: CGPoint(x: 64, y: 55), control1: CGPoint(x: 8, y: 90), control2: CGPoint(x: 64, y: 90))
-                              p.addLine(to: CGPoint(x: 64, y: 45))
-                          }
-                          .stroke(color, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                          .frame(width: 72, height: 90)
-                      }
-                      .frame(height: 100)
-                      
-                      // Ножка микрофона
-                      Rectangle()
-                          .fill(color)
-                          .frame(width: 6, height: 16)
-                      
-                      // Прямоугольная база с закруглениями
-                      RoundedRectangle(cornerRadius: 4)
-                          .fill(color)
-                          .frame(width: 44, height: 8)
-                  }
-                  .frame(width: 100, height: 140)
-              }
-          }
-
           struct WaveView: View {
               @State private var wave = false
               var body: some View {
                   ZStack {
-                      ForEach(0..<2) { i in
+                      ForEach(0..<3) { i in
                           Circle()
-                              .stroke(Color.cyan.opacity(0.4), lineWidth: 2)
-                              .frame(width: 150, height: 150)
-                              .scaleEffect(wave ? 3.5 : 1)
-                              .opacity(wave ? 0 : 1)
-                              .animation(Animation.easeOut(duration: 4).repeatForever(autoreverses: false).delay(Double(i) * 2), value: wave)
+                              .stroke(Color.blue, lineWidth: 10)
+                              .frame(width: 130, height: 130)
+                              .scaleEffect(wave ? 3.0 : 1.0)
+                              .opacity(wave ? 0 : 0.6)
+                              .animation(Animation.easeOut(duration: 2.5).repeatForever(autoreverses: false).delay(Double(i) * 0.8), value: wave)
                       }
                   }
                   .onAppear { wave = true }
@@ -252,7 +233,12 @@ jobs:
                           ZStack {
                               if streamer.isStreaming { WaveView() }
                               Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(config: settings) }) {
-                                  CustomMicIcon(isActive: streamer.isStreaming)
+                                  Image(systemName: "mic.fill")
+                                      .font(.system(size: 90, weight: .regular))
+                                      .foregroundColor(.white)
+                                      .shadow(color: .black.opacity(0.8), radius: 10, x: 0, y: 5)
+                                      .frame(width: 140, height: 140)
+                                      .background(Color.clear)
                               }
                               .buttonStyle(PlainButtonStyle())
                           }
@@ -263,6 +249,7 @@ jobs:
           }
 
           struct SettingsView: View {
+              @ObservedObject var streamer: AudioStreamer
               @ObservedObject var settings: StreamSettings
               @State private var availableOptions: [MicInputOption] = []
               @State private var availableRates: [Double] = [16000.0, 32000.0, 44100.0, 48000.0]
@@ -270,9 +257,9 @@ jobs:
               var body: some View {
                   NavigationView {
                       Form {
-                          Section(header: Text("Сеть")) {
+                          Section(header: Text("Подключение")) {
                               HStack {
-                                  Text("IP Address")
+                                  Text("IP-адрес")
                                   Spacer()
                                   TextField("192.168.1.1", text: $settings.ipAddress)
                                       .multilineTextAlignment(.trailing)
@@ -280,7 +267,7 @@ jobs:
                                       .foregroundColor(.secondary)
                               }
                               HStack {
-                                  Text("Port")
+                                  Text("Порт")
                                   Spacer()
                                   TextField("12345", text: $settings.port)
                                       .multilineTextAlignment(.trailing)
@@ -288,49 +275,62 @@ jobs:
                                       .foregroundColor(.secondary)
                               }
                               Picker("Протокол", selection: $settings.protocolType) {
-                                  Text("UDP (Fast)").tag("UDP")
-                                  Text("TCP (Reliable)").tag("TCP")
+                                  Text("UDP (Быстрый)").tag("UDP")
+                                  Text("TCP (Надежный)").tag("TCP")
                               }
                           }
                           
-                          Section(header: Text("Устройство захвата")) {
-                              Picker("Микрофон", selection: $settings.activeMic) {
+                          Section(header: Text("Захват звука")) {
+                              Picker("Устройство", selection: $settings.activeMic) {
                                   Text("Автоматически").tag(nil as MicInputOption?)
                                   ForEach(availableOptions, id: \.self) { option in
                                       Text(option.name).tag(option as MicInputOption?)
                                   }
                               }
-                              Toggle("Голосовая оптимизация (AEC/AGC)", isOn: $settings.voiceProcessing)
-                              Toggle("Приглушать фоновые звуки", isOn: $settings.duckOthers)
+                              
+                              VStack(alignment: .leading) {
+                                  Text("Чувствительность: \(Int(settings.micGain * 100))%")
+                                  Slider(value: Binding(
+                                      get: { settings.micGain },
+                                      set: { newValue in
+                                          settings.micGain = newValue
+                                          streamer.updateGain(newValue)
+                                      }
+                                  ), in: 0.1...3.0, step: 0.1)
+                              }
+                              
+                              Toggle("Голосовая оптимизация", isOn: $settings.voiceProcessing)
+                              Toggle("Приглушать другие звуки", isOn: $settings.duckOthers)
                           }
                           
-                          Section(header: Text("Аудиоформат")) {
+                          Section(header: Text("Качество и формат")) {
                               Picker("Частота", selection: $settings.sampleRate) {
-                                  ForEach(availableRates, id: \.self) { rate in Text("\(Int(rate/1000)) kHz").tag(rate) }
+                                  ForEach(availableRates, id: \.self) { rate in Text("\(Int(rate/1000))").tag(rate) }
                               }
                               Picker("Каналы", selection: $settings.channels) {
                                   Text("Моно").tag(1)
                                   Text("Стерео").tag(2)
                               }
                               Picker("Разрядность", selection: $settings.bitDepth) {
-                                  Text("16-bit (Int16)").tag("Int16")
-                                  Text("32-bit (Float32)").tag("Float32")
+                                  Text("16 бит").tag("Int16")
+                                  Text("32 бита").tag("Float32")
                               }
                           }
                           
-                          Section(header: Text("Производительность"), footer: Text("Конфигурация размера буфера влияет на задержку (latency) аудиотракта. Минимальные значения обеспечивают Real-Time передачу, но повышают интенсивность пакетной отправки на сетевой интерфейс.")) {
+                          Section(header: Text("Сеть и буфер"), footer: Text("Меньший размер снижает задержку звука, но сильнее нагружает сеть.")) {
                               Picker("Размер буфера", selection: $settings.bufferSize) {
                                   Text("512").tag(512)
                                   Text("1024").tag(1024)
                                   Text("2048").tag(2048)
                                   Text("4096").tag(4096)
                               }
+                              Toggle("Приоритет трафика", isOn: $settings.qosVoice)
                           }
                           
                           Section(header: Text("Система")) {
-                              Toggle("Активный экран (Keep Awake)", isOn: $settings.keepAwake)
+                              Toggle("Не выключать экран при работе", isOn: $settings.keepAwake)
                               Toggle("Тактильный отклик", isOn: $settings.hapticFeedback)
-                              Button("Пересканировать оборудование") { refreshDevices() }
+                              Button("Обновить список устройств") { refreshDevices() }
                           }
                       }
                       .navigationTitle("Настройки")
@@ -375,11 +375,11 @@ jobs:
               var body: some View {
                   TabView {
                       MainView(streamer: streamer, settings: settings)
-                          .tabItem { Label("Микрофон", systemImage: "mic.fill") }
+                          .tabItem { Label("Микрофон", systemImage: "waveform") }
                           .toolbar(.visible, for: .tabBar)
                           .toolbarBackground(Color.black, for: .tabBar)
                           .toolbarColorScheme(.dark, for: .tabBar)
-                      SettingsView(settings: settings)
+                      SettingsView(streamer: streamer, settings: settings)
                           .tabItem { Label("Настройки", systemImage: "gearshape.fill") }
                   }
                   .onAppear { AVAudioSession.sharedInstance().requestRecordPermission { _ in } }
