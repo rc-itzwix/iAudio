@@ -1,0 +1,28 @@
+name: Build IPA
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install xcodegen
+        run: brew install xcodegen
+        
+      - name: Generate Xcode project
+        run: xcodegen generate
+        
+      - name: Build Payload
+        run: |
+          xcodebuild build -project iAudioApp.xcodeproj -scheme iAudioApp -configuration Release -arch arm64 -sdk iphoneos CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          mkdir -p Payload
+          mv build/Release-iphoneos/iAudioApp.app Payload/
+          zip -r iAudioApp.ipa Payload
+          
+      - name: Upload IPA
+        uses: actions/upload-artifact@v3
+        with:
+          name: iAudioApp-IPA
+          path: iAudioApp.ipa
