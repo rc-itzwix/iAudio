@@ -130,7 +130,7 @@ jobs:
         
       - name: Build Payload
         run: |
-          xcodebuild build -project iAudioApp.xcodeproj -scheme iAudioApp -configuration Release -arch arm64 -sdk iphoneos CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          xcodebuild build -project iAudioApp.xcodeproj -scheme iAudioApp -configuration Release -arch arm64 -sdk iphoneos CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO CONFIGURATION_BUILD_DIR=build/Release-iphoneos
           mkdir -p Payload
           mv build/Release-iphoneos/iAudioApp.app Payload/
           zip -r iAudioApp.ipa Payload
