@@ -97,7 +97,7 @@ jobs:
                   } catch {}
                   
                   let inputNode = audioEngine.inputNode
-                  let inputFormat = inputNode.inputFormat(onBus: 0)
+                  let inputFormat = inputNode.inputFormat(forBus: 0)
                   let outputFormat = AVAudioFormat(
                       commonFormat: config.bitDepth == "Int16" ? .pcmFormatInt16 : .pcmFormatFloat32,
                       sampleRate: config.sampleRate,
@@ -111,7 +111,7 @@ jobs:
                       guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
                       var error: NSError?
                       converter?.convert(to: outBuffer, error: &error) { inNumPackets, outStatus in
-                          outStatus.pointee = .haveData
+                          outStatus.pointee = AVAudioConverterOutputStatus.haveData
                           return buffer
                       }
                       if let data = self.toData(buffer: outBuffer) {
