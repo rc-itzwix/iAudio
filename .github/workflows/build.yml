@@ -54,9 +54,7 @@ jobs:
           @main
           struct iAudioAppApp: App {
               var body: some Scene {
-                  WindowGroup {
-                      ContentView()
-                  }
+                  WindowGroup { ContentView() }
               }
           }
           EOF
@@ -69,7 +67,7 @@ jobs:
           class StreamSettings: ObservableObject {
               @AppStorage("ipAddress") var ipAddress: String = "192.168.137.1"
               @AppStorage("port") var port: String = "12345"
-              @AppStorage("mode") var mode: String = "Wi-Fi" // "Wi-Fi" или "USB"
+              @AppStorage("mode") var mode: String = "Wi-Fi" 
           }
 
           class AudioStreamer: ObservableObject {
@@ -83,19 +81,20 @@ jobs:
               func start(settings: StreamSettings) {
                   let portNum = NWEndpoint.Port(settings.port) ?? 12345
                   
+                  // Настройка параметров протоколов
+                  let tcpOptions = NWProtocolTCP.Options()
+                  tcpOptions.noDelay = true // Критично для звука по USB
+                  let tcpParams = NWParameters(tls: nil, tcp: tcpOptions)
+                  
                   if settings.mode == "Wi-Fi" {
-                      // Wi-Fi UDP Mode (Старая добрая схема)
                       let host = NWEndpoint.Host(settings.ipAddress)
                       connection = NWConnection(host: host, port: portNum, using: .udp)
                       connection?.start(queue: .global())
+                      self.setupAudio()
                   } else {
-                      // USB TCP Mode (Для usbmuxd)
-                      let tcpOptions = NWProtocolTCP.Options()
-                      tcpOptions.noDelay = true // Убираем задержки TCP пакетов
-                      let params = NWParameters(tls: nil, tcp: tcpOptions)
-                      
+                      // USB Mode: Работаем как сервер для C# моста
                       do {
-                          listener = try NWListener(using: params, on: portNum)
+                          listener = try NWListener(using: tcpParams, on: portNum)
                           listener?.newConnectionHandler = { newConn in
                               self.connection = newConn
                               newConn.stateUpdateHandler = { state in
@@ -104,30 +103,31 @@ jobs:
                               newConn.start(queue: .global())
                           }
                           listener?.start(queue: .global())
+                          self.setupAudio()
                       } catch { print(error) }
                   }
-                  
-                  // ЯДЕРНАЯ ЛОГИКА ЗАХВАТА ЗВУКА (БЕЗ ИЗМЕНЕНИЙ)
+              }
+              
+              private func setupAudio() {
                   let audioSession = AVAudioSession.sharedInstance()
                   try? audioSession.setCategory(.record, mode: .measurement, options: [.allowBluetooth])
                   try? audioSession.setPreferredSampleRate(48000)
                   try? audioSession.setActive(true)
                   
                   let inputNode = audioEngine.inputNode
-                  // Тот самый формат из рабочего билда
                   let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48000, channels: 1, interleaved: true)!
                   
+                  // Твой рабочий конфиг: buffer 960, прямой забор данных
                   inputNode.installTap(onBus: 0, bufferSize: 960, format: format) { (buffer, time) in
                       guard let channelData = buffer.int16ChannelData else { return }
                       let frameLength = Int(buffer.frameLength)
-                      // Прямое копирование байтов как в старой версии
                       let data = Data(bytes: channelData[0], count: frameLength * 2)
                       
                       self.connection?.send(content: data, completion: .contentProcessed({ _ in }))
                   }
                   
                   try? audioEngine.start()
-                  isStreaming = true
+                  DispatchQueue.main.async { self.isStreaming = true }
               }
               
               func stop() {
@@ -150,61 +150,40 @@ jobs:
                       
                       ZStack {
                           Circle()
-                              .fill(streamer.isStreaming ? (settings.mode == "USB" && !streamer.usbConnected ? Color.orange : Color.green) : Color.red)
+                              .fill(streamer.isStreaming ? (settings.mode == "USB" && !streamer.usbConnected ? Color.orange : Color.blue) : Color.gray)
                               .frame(width: 200, height: 200)
-                              .shadow(radius: 10)
                           
                           Button(action: {
                               streamer.isStreaming ? streamer.stop() : streamer.start(settings: settings)
                           }) {
-                              Image(systemName: streamer.isStreaming ? "stop.fill" : "play.fill")
-                                  .font(.system(size: 60))
-                                  .foregroundColor(.white)
+                              Image(systemName: streamer.isStreaming ? "mic.fill" : "mic.slash.fill")
+                                  .font(.system(size: 80)).foregroundColor(.white)
                           }
                       }
                       
-                      VStack(spacing: 10) {
-                          Text(streamer.isStreaming ? "В ЭФИРЕ" : "ОСТАНОВЛЕНО")
-                              .font(.title2).bold()
-                          
-                          if settings.mode == "USB" && streamer.isStreaming {
-                              Text(streamer.usbConnected ? "USB ПОДКЛЮЧЕНО" : "ОЖИДАНИЕ КАБЕЛЯ...")
-                                  .foregroundColor(streamer.usbConnected ? .green : .orange)
-                          } else if streamer.isStreaming {
-                              Text("Цель: \(settings.ipAddress):\(settings.port)")
-                                  .foregroundColor(.secondary)
-                          }
-                      }
+                      Text(streamer.isStreaming ? (settings.mode == "USB" && !streamer.usbConnected ? "ОЖИДАНИЕ ПОДКЛЮЧЕНИЯ..." : "В ЭФИРЕ") : "ГОТОВ")
+                          .font(.headline)
                   }
               }
           }
 
           struct SettingsView: View {
               @ObservedObject var settings: StreamSettings
-              
               var body: some View {
                   NavigationView {
                       Form {
-                          Section(header: Text("Тип соединения")) {
+                          Section(header: Text("Соединение")) {
                               Picker("Режим", selection: $settings.mode) {
                                   Text("Wi-Fi (UDP)").tag("Wi-Fi")
-                                  Text("USB (TCP)").tag("USB")
+                                  Text("USB (Кабель)").tag("USB")
                               }.pickerStyle(SegmentedPickerStyle())
-                          }
-                          
-                          if settings.mode == "Wi-Fi" {
-                              Section(header: Text("Сетевой адрес")) {
+                              
+                              if settings.mode == "Wi-Fi" {
                                   TextField("IP Address", text: $settings.ipAddress)
-                                      .keyboardType(.numbersAndPunctuation)
                               }
+                              TextField("Port", text: $settings.port)
                           }
-                          
-                          Section(header: Text("Порт")) {
-                              TextField("Порт", text: $settings.port)
-                                  .keyboardType(.numberPad)
-                          }
-                      }
-                      .navigationTitle("Настройки")
+                      }.navigationTitle("Настройки")
                   }
               }
           }
@@ -212,14 +191,12 @@ jobs:
           struct ContentView: View {
               @StateObject var streamer = AudioStreamer()
               @StateObject var settings = StreamSettings()
-              
               var body: some View {
                   TabView {
                       MainView(streamer: streamer, settings: settings)
-                          .tabItem { Label("Эфир", systemImage: "mic.fill") }
-                      
+                          .tabItem { Label("Микрофон", systemImage: "mic") }
                       SettingsView(settings: settings)
-                          .tabItem { Label("Настройки", systemImage: "gearshape.fill") }
+                          .tabItem { Label("Настройки", systemImage: "gear") }
                   }
               }
           }
