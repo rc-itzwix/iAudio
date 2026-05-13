@@ -38,9 +38,9 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>NSMicrophoneUsageDescription</key>
-            <string>Нужен микрофон для передачи аудио на ПК</string>
+            <string>Передача аудио на ПК</string>
             <key>NSLocalNetworkUsageDescription</key>
-            <string>Нужен доступ к сети для Wi-Fi режима</string>
+            <string>Связь по Wi-Fi</string>
             <key>UIBackgroundModes</key>
             <array>
               <string>audio</string>
@@ -67,62 +67,58 @@ jobs:
           class StreamSettings: ObservableObject {
               @AppStorage("ipAddress") var ipAddress: String = "192.168.137.1"
               @AppStorage("port") var port: String = "12345"
-              @AppStorage("mode") var mode: String = "Wi-Fi" 
+              @AppStorage("mode") var mode: String = "USB" 
           }
 
           class AudioStreamer: ObservableObject {
               @Published var isStreaming = false
               @Published var usbConnected = false
-              
               private var audioEngine = AVAudioEngine()
               private var connection: NWConnection?
               private var listener: NWListener?
               
               func start(settings: StreamSettings) {
-                  let portNum = NWEndpoint.Port(settings.port) ?? 12345
-                  
-                  // Настройка параметров протоколов
                   let tcpOptions = NWProtocolTCP.Options()
-                  tcpOptions.noDelay = true // Критично для звука по USB
+                  tcpOptions.noDelay = true
                   let tcpParams = NWParameters(tls: nil, tcp: tcpOptions)
                   
                   if settings.mode == "Wi-Fi" {
                       let host = NWEndpoint.Host(settings.ipAddress)
-                      connection = NWConnection(host: host, port: portNum, using: .udp)
-                      connection?.start(queue: .global())
-                      self.setupAudio()
+                      let port = NWEndpoint.Port(settings.port) ?? 12345
+                      connection = NWConnection(host: host, port: port, using: .udp)
+                      connection?.start(queue: .global(qos: .userInteractive))
+                      setupAudio()
                   } else {
-                      // USB Mode: Работаем как сервер для C# моста
+                      let port = NWEndpoint.Port(settings.port) ?? 12345
                       do {
-                          listener = try NWListener(using: tcpParams, on: portNum)
+                          listener = try NWListener(using: tcpParams, on: port)
                           listener?.newConnectionHandler = { newConn in
                               self.connection = newConn
                               newConn.stateUpdateHandler = { state in
                                   DispatchQueue.main.async { self.usbConnected = (state == .ready) }
                               }
-                              newConn.start(queue: .global())
+                              newConn.start(queue: .global(qos: .userInteractive))
                           }
-                          listener?.start(queue: .global())
-                          self.setupAudio()
+                          listener?.start(queue: .global(qos: .userInteractive))
+                          setupAudio()
                       } catch { print(error) }
                   }
               }
               
               private func setupAudio() {
-                  let audioSession = AVAudioSession.sharedInstance()
-                  try? audioSession.setCategory(.record, mode: .measurement, options: [.allowBluetooth])
-                  try? audioSession.setPreferredSampleRate(48000)
-                  try? audioSession.setActive(true)
+                  let session = AVAudioSession.sharedInstance()
+                  try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker])
+                  try? session.setPreferredSampleRate(48000)
+                  try? session.setPreferredIOBufferDuration(0.005) 
+                  try? session.setActive(true)
                   
                   let inputNode = audioEngine.inputNode
                   let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48000, channels: 1, interleaved: true)!
                   
-                  // Твой рабочий конфиг: buffer 960, прямой забор данных
-                  inputNode.installTap(onBus: 0, bufferSize: 960, format: format) { (buffer, time) in
+                  inputNode.removeTap(onBus: 0)
+                  inputNode.installTap(onBus: 0, bufferSize: 480, format: format) { (buffer, time) in
                       guard let channelData = buffer.int16ChannelData else { return }
-                      let frameLength = Int(buffer.frameLength)
-                      let data = Data(bytes: channelData[0], count: frameLength * 2)
-                      
+                      let data = Data(bytes: channelData[0], count: Int(buffer.frameLength) * 2)
                       self.connection?.send(content: data, completion: .contentProcessed({ _ in }))
                   }
                   
@@ -136,55 +132,6 @@ jobs:
                   connection?.cancel()
                   listener?.cancel()
                   isStreaming = false
-                  usbConnected = false
-              }
-          }
-
-          struct MainView: View {
-              @ObservedObject var streamer: AudioStreamer
-              @ObservedObject var settings: StreamSettings
-              
-              var body: some View {
-                  VStack(spacing: 40) {
-                      Text("iAudio Mic").font(.largeTitle).bold()
-                      
-                      ZStack {
-                          Circle()
-                              .fill(streamer.isStreaming ? (settings.mode == "USB" && !streamer.usbConnected ? Color.orange : Color.blue) : Color.gray)
-                              .frame(width: 200, height: 200)
-                          
-                          Button(action: {
-                              streamer.isStreaming ? streamer.stop() : streamer.start(settings: settings)
-                          }) {
-                              Image(systemName: streamer.isStreaming ? "mic.fill" : "mic.slash.fill")
-                                  .font(.system(size: 80)).foregroundColor(.white)
-                          }
-                      }
-                      
-                      Text(streamer.isStreaming ? (settings.mode == "USB" && !streamer.usbConnected ? "ОЖИДАНИЕ ПОДКЛЮЧЕНИЯ..." : "В ЭФИРЕ") : "ГОТОВ")
-                          .font(.headline)
-                  }
-              }
-          }
-
-          struct SettingsView: View {
-              @ObservedObject var settings: StreamSettings
-              var body: some View {
-                  NavigationView {
-                      Form {
-                          Section(header: Text("Соединение")) {
-                              Picker("Режим", selection: $settings.mode) {
-                                  Text("Wi-Fi (UDP)").tag("Wi-Fi")
-                                  Text("USB (Кабель)").tag("USB")
-                              }.pickerStyle(SegmentedPickerStyle())
-                              
-                              if settings.mode == "Wi-Fi" {
-                                  TextField("IP Address", text: $settings.ipAddress)
-                              }
-                              TextField("Port", text: $settings.port)
-                          }
-                      }.navigationTitle("Настройки")
-                  }
               }
           }
 
@@ -193,10 +140,23 @@ jobs:
               @StateObject var settings = StreamSettings()
               var body: some View {
                   TabView {
-                      MainView(streamer: streamer, settings: settings)
-                          .tabItem { Label("Микрофон", systemImage: "mic") }
-                      SettingsView(settings: settings)
-                          .tabItem { Label("Настройки", systemImage: "gear") }
+                      VStack(spacing: 30) {
+                          Text("iAudio").font(.largeTitle).bold()
+                          Button(action: { streamer.isStreaming ? streamer.stop() : streamer.start(settings: settings) }) {
+                              Circle().fill(streamer.isStreaming ? (settings.mode == "USB" && !streamer.usbConnected ? .orange : .blue) : .gray)
+                                  .frame(width: 150, height: 150)
+                                  .overlay(Image(systemName: streamer.isStreaming ? "mic.fill" : "mic.slash.fill").foregroundColor(.white).font(.system(size: 60)))
+                          }
+                          Text(streamer.isStreaming ? "STREAMING" : "READY").bold()
+                      }.tabItem { Label("Mic", systemImage: "mic") }
+                      
+                      NavigationView {
+                          Form {
+                              Picker("Mode", selection: $settings.mode) { Text("Wi-Fi").tag("Wi-Fi"); Text("USB").tag("USB") }.pickerStyle(SegmentedPickerStyle())
+                              if settings.mode == "Wi-Fi" { TextField("IP", text: $settings.ipAddress) }
+                              TextField("Port", text: $settings.port)
+                          }.navigationTitle("Settings")
+                      }.tabItem { Label("Settings", systemImage: "gear") }
                   }
               }
           }
