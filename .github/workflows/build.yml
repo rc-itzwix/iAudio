@@ -75,6 +75,7 @@ jobs:
           }
 
           class StreamSettings: ObservableObject {
+              @AppStorage("connectionMode") var connectionMode: String = "Wi-Fi"
               @AppStorage("ipAddress") var ipAddress: String = "192.168.1.100"
               @AppStorage("port") var port: String = "12345"
               @AppStorage("sampleRate") var sampleRate: Double = 48000.0
@@ -92,14 +93,27 @@ jobs:
               @Published var isStreaming = false
               private var audioEngine = AVAudioEngine()
               private var connection: NWConnection?
+              private var listener: NWListener?
               
               func start(config: StreamSettings) {
-                  let host = NWEndpoint.Host(config.ipAddress)
                   let portNum = NWEndpoint.Port(config.port) ?? 12345
-                  let params: NWParameters = config.protocolType == "TCP" ? .tcp : .udp
                   
-                  connection = NWConnection(host: host, port: portNum, using: params)
-                  connection?.start(queue: .global())
+                  if config.connectionMode == "Wi-Fi" {
+                      let host = NWEndpoint.Host(config.ipAddress)
+                      let params: NWParameters = config.protocolType == "TCP" ? .tcp : .udp
+                      connection = NWConnection(host: host, port: portNum, using: params)
+                      connection?.start(queue: .global())
+                  } else {
+                      // USB Mode: Слушаем входящее подключение от ПК
+                      do {
+                          listener = try NWListener(using: .tcp, on: portNum)
+                          listener?.newConnectionHandler = { newConn in
+                              self.connection = newConn
+                              newConn.start(queue: .global())
+                          }
+                          listener?.start(queue: .global())
+                      } catch { print("Listener error") }
+                  }
                   
                   UIApplication.shared.isIdleTimerDisabled = config.keepAwake
                   
@@ -155,6 +169,7 @@ jobs:
                   audioEngine.stop()
                   audioEngine.inputNode.removeTap(onBus: 0)
                   connection?.cancel()
+                  listener?.cancel()
                   isStreaming = false
                   UIApplication.shared.isIdleTimerDisabled = false
                   UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
@@ -227,14 +242,23 @@ jobs:
                   NavigationView {
                       Form {
                           Section(header: Text("Подключение")) {
-                              HStack {
-                                  Text("IP-адрес")
-                                  Spacer()
-                                  TextField("192.168.1.1", text: $settings.ipAddress)
-                                      .multilineTextAlignment(.trailing)
-                                      .keyboardType(.numbersAndPunctuation)
-                                      .foregroundColor(.secondary)
+                              Picker("Тип соединения", selection: $settings.connectionMode) {
+                                  Text("Wi-Fi (IP)").tag("Wi-Fi")
+                                  Text("USB (Кабель)").tag("USB")
                               }
+                              .pickerStyle(SegmentedPickerStyle())
+                              
+                              if settings.connectionMode == "Wi-Fi" {
+                                  HStack {
+                                      Text("IP-адрес")
+                                      Spacer()
+                                      TextField("192.168.1.1", text: $settings.ipAddress)
+                                          .multilineTextAlignment(.trailing)
+                                          .keyboardType(.numbersAndPunctuation)
+                                          .foregroundColor(.secondary)
+                                  }
+                              }
+                              
                               HStack {
                                   Text("Порт")
                                   Spacer()
@@ -243,9 +267,12 @@ jobs:
                                       .keyboardType(.numberPad)
                                       .foregroundColor(.secondary)
                               }
-                              Picker("Протокол", selection: $settings.protocolType) {
-                                  Text("UDP (Быстрый)").tag("UDP")
-                                  Text("TCP (Надежный)").tag("TCP")
+                              
+                              if settings.connectionMode == "Wi-Fi" {
+                                  Picker("Протокол", selection: $settings.protocolType) {
+                                      Text("UDP (Быстрый)").tag("UDP")
+                                      Text("TCP (Надежный)").tag("TCP")
+                                  }
                               }
                           }
                           
